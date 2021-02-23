@@ -1,0 +1,254 @@
+---
+title: "DyNet paper - Bitcoin OTC data analysis"
+author:
+    name: Joshua Cape
+    affiliation: University of Pittsburgh
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    df_print: paged
+---
+
+Data synopsis: Bitcoin OTC trust weighted signed (temporal) network
+
+Data access: https://snap.stanford.edu/data/soc-sign-bitcoin-otc.html
+
+Data filename (local): bitcoinotc.csv
+
+# Load preamble
+```{r message=FALSE}
+
+  rm(list = ls())
+  
+  knitr::opts_chunk$set(comment = NA)
+  
+  source("code_dynet_preamble.R")
+  
+```
+
+
+# Load data
+```{r message=FALSE}
+
+  soc_sign_bitcoin <-
+    read_csv("soc-sign-bitcoinotc.csv",
+             col_names = c("source","target","rating","time"))
+
+  my.data <- as.data.frame(soc_sign_bitcoin)
+  my.data$time <- year(as_datetime(my.data$time))
+
+  edge.table <- table(my.data$time); edge.table # counts number of links for each year
+  my.years <- names(edge.table)[2:6] # specified years of interest: 2011, ..., 2015
+  
+```
+
+```{r message=FALSE}
+
+  # >>> Checks <<<
+  #
+      temp <- my.data[my.data$time %in% my.years,c("source","target")]; # restrict to specified years
+      dim(as.data.frame(distinct(temp))) # number of distinct directed edges across time
+      dim(as.data.frame(temp)) # number of total directed edges in aggregate graph
+      rm(temp)
+  
+```
+
+# Data preprocessing
+```{r message=FALSE}
+
+# To begin, keep largest connected component over all specified years
+  my.g <- graph_from_edgelist(cbind(my.data$source, my.data$target), directed = TRUE)
+  E(my.g)$weight <- my.data$rating
+  
+  g.components <- components(my.g, mode="weak")
+  
+  my.subgraph <- induced_subgraph(my.g, v=which(g.components$membership==1))
+  # automatically includes E(my.subgraph)$weight
+  
+#   >>> Checks <<<
+#
+#   table(g.components$membership)  
+#  
+#   all(E(my.subgraph)$weight == my.data$rating[my.data$source %in% which(g.components$membership==1)])
+#   induced subgraph automatically keeps corresponding edge weights
+#    
+#   table((my.data$source %in% which(g.components$membership==1)) ==
+#         (my.data$target %in% which(g.components$membership==1)))
+#   dim(my.data)[1]
+#  
+#   Keep my.data rows for which both source & target are in largest component (index)
+#   which(g.components$membership==1)
+
+```
+
+
+## Investigate the aggregate graph
+```{r message=FALSE}
+
+  my.adj <- as_adjacency_matrix(my.subgraph, attr="weight")
+  my.adj.sym <- (my.adj + t(my.adj))/2
+  my.adj.sym.bin <- my.adj.sym
+  my.adj.sym.bin[my.adj.sym > 0.001] <- 1
+  my.adj.sym.bin[my.adj.sym < -0.001] <- -1
+  my.adj.sym.bin[my.adj.sym > -0.001 & my.adj.sym < 0.001] <- 0
+
+  temp <- graph_from_adjacency_matrix(my.adj.sym.bin, weighted = TRUE, mode="undirected")
+  table(E(temp)$weight)
+  is_connected(temp)
+  
+  my.g.agg <- induced_subgraph(temp, which(components(temp,"weak")$membership==1)); rm(temp)
+  table(E(my.g.agg)$weight)
+  is_connected(my.g.agg) # verifies connectivity of graph
+  
+  
+  #set.seed(1234)
+    ASE.agg <-
+      embed_adjacency_matrix(my.g.agg, no=2, which="lm")$X        # compute raw ASE
+    ASE.agg <- varimax(ASE.agg+1e-10, normalize=FALSE)$loadings   # align using varimax
+    ASE.agg <- ASE.agg %*% diag(sign(ASE.agg[1,]))                # pos entries first components
+    
+
+```
+
+
+
+```{r eval = FALSE, echo = FALSE}
+
+# Investigate transformed adjacency matrices (of aggregate graph) 
+  
+  for(data.vals in c(my.adj, my.adj.sym, my.adj.sym.bin)){
+    print(dim(data.vals))
+    print(partial_eigen(data.vals, n=4)$values)
+    print(svdr(data.vals, k=4)$d)
+  }
+  
+# Print tables of edge weights (between -10 and 10)
+    #table(as.numeric(as_adjacency_matrix(my.g, attr="weight")))
+    #table(as.numeric(as_adjacency_matrix(my.subgraph, attr="weight")))
+    #table(as.numeric(my.adj.sym))
+
+```
+
+
+# Process and individually embed the year graphs
+Form graphs from all vertices and (weighted) edges appearing in a given, specified year.
+Symmetrize the adjacency matrix, then binarize.
+Keep the largest weakly connected component.
+```{r message=FALSE}
+
+set.seed(1234)
+
+my.edge.data.list <- list()
+my.year.graphs <- list()
+    
+  for(index in 1:length(my.years)){
+    my.edge.data.list[[index]] <- my.data[my.data$time == my.years[index],]
+    
+    # Step 1
+    my.year.graphs[[index]] <- graph_from_edgelist(cbind(my.edge.data.list[[index]]$source,
+                                         my.edge.data.list[[index]]$target),
+                                   directed = TRUE)
+    E(my.year.graphs[[index]])$weight <- my.edge.data.list[[index]]$rating
+    
+    # Step 2
+    temp1 <- components(my.year.graphs[[index]], mode="weak")
+    temp2 <- which(temp1$membership ==
+                     (which(table(temp1$membership) ==
+                              max(table(temp1$membership)))))
+    
+    my.year.graphs[[index]] <- induced_subgraph(my.year.graphs[[index]],temp2)
+    
+  }
+  
+my.year.graphs.proc <- list()
+my.year.ASE <- list()  
+  
+  for(index in 1:length(my.years)){
+      my.adj <- as_adjacency_matrix(my.year.graphs[[index]], attr="weight")
+      my.adj.sym <- (my.adj + t(my.adj))/2
+    my.adj.sym.bin <- my.adj.sym
+      my.adj.sym.bin[my.adj.sym > 0.001] <- 1
+      my.adj.sym.bin[my.adj.sym < -0.001] <- -1
+      my.adj.sym.bin[my.adj.sym > -0.001 & my.adj.sym < 0.001] <- 0
+      
+    my.year.graphs.proc[[index]] <-
+      graph_from_adjacency_matrix(my.adj.sym.bin, weighted = TRUE, mode="undirected")
+    
+#    print(is_connected(my.year.graphs.proc[[index]])) # checks connectivity of graph
+    
+    # Update
+    
+        temp1 <- components(my.year.graphs.proc[[index]], mode="weak")
+        temp2 <- which(temp1$membership ==
+                         (which(table(temp1$membership) ==
+                                  max(table(temp1$membership)))))
+    my.year.graphs.proc[[index]] <- induced_subgraph(my.year.graphs.proc[[index]], temp2)
+
+#    print(is_connected(my.year.graphs.proc[[index]])) # checks connectivity of graph
+
+    my.year.ASE[[index]] <-
+      embed_adjacency_matrix(my.year.graphs.proc[[index]], no=2, which="lm")$X  # compute raw ASE
+    my.year.ASE[[index]] <-
+      varimax(my.year.ASE[[index]]+1e-10, normalize=FALSE)$loadings             # align using varimax
+    my.year.ASE[[index]] <-
+      my.year.ASE[[index]] %*% diag(sign(my.year.ASE[[index]][1,]))             # + sign first components
+  }
+
+  my.year.graphs.proc[[6]] <- my.g.agg
+
+```
+
+
+```{r message=FALSE}
+
+  mtx_print(
+    sapply(my.year.graphs.proc, function(x){c(length(V(x)),length(E(x)))})
+    )
+
+mtx_print(rbind(
+      format(signif(sapply(my.year.graphs.proc, function(x){table(E(x)$weight)})["-1",]/
+        colSums(sapply(my.year.graphs.proc, function(x){table(E(x)$weight)})) * 100, 3))))
+
+  mtx_print(
+    rbind(
+      format(round(sapply(my.year.graphs.proc, function(x){edge_density(x)}), 3), nsmall=3)
+    )
+  )
+
+```
+
+# All plots
+```{r message=FALSE, warning=FALSE}
+
+library(cowplot)
+
+df.ASE.years <- list()
+my.col.names <- c("x","y")
+
+temp.vals <- 1
+temp.sz <- 0.5
+
+for(index in 1:length(my.years)){
+  df.ASE.years[[index]] <- as.data.frame(my.year.ASE[[index]])
+  colnames(df.ASE.years[[index]]) <- my.col.names
+  
+  assign(paste("viz.ASE.", index, sep=""), ggplot(df.ASE.years[[index]]) +
+           geom_point(aes(x, y), size=temp.sz) + xlim(-temp.vals, temp.vals) + ylim(-temp.vals, temp.vals)
+         )
+}
+
+  df.ASE.years.agg <- as.data.frame(ASE.agg)
+  colnames(df.ASE.years.agg) <- my.col.names
+  viz.ASE.agg <- ggplot(df.ASE.years.agg) + geom_point(aes(x, y), size=temp.sz) + xlim(-temp.vals, temp.vals) + ylim(-temp.vals, temp.vals)
+
+
+my.plot.grid <-
+  plot_grid(viz.ASE.1, viz.ASE.2, viz.ASE.3, viz.ASE.4, viz.ASE.5, viz.ASE.agg, labels="AUTO")
+
+my.plot.grid
+
+```
+
+
+
+## End of File

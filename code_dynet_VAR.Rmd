@@ -1,0 +1,395 @@
+---
+title: "DyNet paper code: Prelims & VAR dynamics"
+author:
+    name: Joshua Cape
+    affiliation: University of Pittsburgh
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    df_print: paged
+---
+
+## Preliminaries
+```{r message=FALSE}
+
+    rm(list = ls())
+
+    knitr::opts_chunk$set(comment = NA)
+
+    source("code_dynet_preamble.R")
+
+```
+
+## Initialization
+```{r}
+
+    set.seed(12345)
+    lp.dim <- 2;
+    lp.num <- 200;
+    
+#######################
+    
+    lpvs0 <- diag(lp.dim)
+    
+    lpvs <- rbind(lpvs0,
+                  t(apply(matrix(rnorm((lp.num - dim(lpvs0)[1]) * lp.dim, mean=0, sd=1),
+                                 nrow=(lp.num - dim(lpvs0)[1]), ncol=lp.dim),
+                             1,
+                             function(x) (x/norm(x, "2"))*runif(1, min=0, max=1)^(1/lp.dim))))
+    
+    XXT <- lpvs %*% t(lpvs)
+    Prob <- abs(XXT)
+    A <- matrix(runif(lp.num*lp.num) <= Prob, nrow=lp.num)
+
+    matrix.A <- sym(A) * sign(XXT)
+    
+    my.eigen <- partial_eigen(matrix.A, lp.dim, symmetric=TRUE)
+    my.scaled <- my.eigen$vectors %*% abs(diag(my.eigen$values))^(1/2)
+
+    my.candidate.svd <- svd(my.scaled[1:lp.dim,])
+    my.candidate.orthog <- my.candidate.svd$u %*% t(my.candidate.svd$v)
+    my.supervised.orthog <- my.candidate.orthog
+   
+    theory.svd <- svd(t(lpvs) %*% my.scaled)
+    theory.orthog <- theory.svd$u %*% t(theory.svd$v)
+     
+```
+
+
+## Introductory plots: visualizing latent vectors and supervised embedding
+```{r}
+
+        dat.circle <- circleFun(c(0,0), 2, npoints = 100)
+    
+        dat.circle.ttinf <- circleFun(c(0,0), 2*ttinf(my.scaled %*% t(theory.orthog) - lpvs), npoints = 100)
+    
+        temp.df1 <- as.data.frame(lpvs)
+        colnames(temp.df1) <- c("x","y")
+        
+        temp.df2 <- as.data.frame(my.scaled %*% t(my.supervised.orthog))
+        colnames(temp.df2) <- c("x","y")
+        
+        temp.df3 <- as.data.frame(my.scaled)
+        colnames(temp.df3) <- c("x","y")
+
+    temp.g1 <- ggplot(dat.circle, aes(x,y)) + geom_path() + coord_fixed(ratio=1) +
+      geom_point(data=temp.df1, aes(x, y), pch=0)
+    
+    temp.g2 <- ggplot(dat.circle, aes(x,y)) + geom_path() + coord_fixed(ratio=1) +
+      geom_point(data=temp.df2, aes(x, y))
+    
+    temp.g3 <- ggplot(data=dat.circle.ttinf, aes(x,y)) +
+      xlim(-0.4, 0.4) + ylim(-0.4, 0.4) + coord_fixed(ratio=1) +
+      
+    geom_point(data=dat.circle.ttinf, aes(x,y), lwd=1/10) +
+      geom_point(data=(temp.df1-temp.df2), aes(x, y), pch=18) + 
+        geom_point(data=(temp.df1-temp.df3), aes(x, y), pch=3)
+
+```
+
+```{r}
+
+  temp.g1 + temp.g2 + temp.g3
+
+```
+
+
+## Example: single node dynamics among few dynamic nodes
+```{r}
+    
+    dynamic.node.num <- 10
+    lp.num <- 200
+    t.max <- 50
+    
+    # specify rotation matrices via hyperparameter thetas
+    hyper.thetas <- as.list(c(rep(0,lp.dim),
+                                (2*pi)*(1/dynamic.node.num)*seq(1,dynamic.node.num)))
+    
+    trans1 <- lapply(hyper.thetas, rot_mtx)
+    
+    lpvec.list <- list()
+        lpvec.list[[1]] <- lpvs
+    
+    for(t in 2:t.max){
+      lpvec.list[[t]] <- matrix(0, nrow=lp.num, ncol=lp.dim)
+      for(lp in 1:lp.dim)
+        lpvec.list[[t]][lp,] <- lpvec.list[[t-1]][lp,]
+      for(lp in (lp.dim+1):(lp.dim + dynamic.node.num))
+      {
+        lpvec.list[[t]][lp,] <- lpvec.list[[1]][lp,] %*% matrix.power(t(trans1[[lp]]), t-1)
+        }
+      lpvec.list[[t]][(lp.dim + dynamic.node.num + 1):lp.num,] <- t(apply(
+        matrix(rnorm((lp.num-lp.dim-dynamic.node.num)*lp.dim, mean=0, sd=1),
+               nrow=(lp.num-lp.dim-dynamic.node.num),
+               ncol=lp.dim),
+        1,
+        function(x) (x/norm(x, "2"))*runif(1, min=0, max=1)^(1/lp.dim)))
+    }
+    
+    
+    adj.list <- list()
+    raw.scaled.list <- list()
+    svsd.orthog.list <- list()
+    
+    Xhat.list <- list()
+        Xhat.list[[1]] <- my.scaled %*% t(my.supervised.orthog)
+    
+    
+    for(t in 1:t.max){
+      
+      A <- matrix(runif(lp.num*lp.num) <= abs(lpvec.list[[t]] %*% t(lpvec.list[[t]])), nrow=lp.num)
+      adj.list[[t]] <- sym(A) * sign(lpvec.list[[t]] %*% t(lpvec.list[[t]]))
+    
+      my.eigen <- partial_eigen(adj.list[[t]], lp.dim, symmetric=TRUE)
+      raw.scaled.list[[t]] <- my.eigen$vectors %*% abs(diag(my.eigen$values))^(1/2)
+    
+      my.candidate.svd <- svd(raw.scaled.list[[t]][1:lp.dim,])
+      my.candidate.orthog <- my.candidate.svd$u %*% t(my.candidate.svd$v)
+      svsd.orthog.list[[t]] <- my.candidate.orthog
+    
+      Xhat.list[[t]] <- raw.scaled.list[[t]] %*% t(svsd.orthog.list[[t]])
+      
+    }
+
+```
+
+
+### Single node dynamics - three optional plots
+```{r}
+
+which.node <- 3 # NB: first two are seed nodes
+
+temp.mtx <- matrix(0, nrow=t.max, ncol=lp.dim)
+
+##########
+    
+    for(t in 1:t.max)
+      temp.mtx[t,] <- Xhat.list[[t]][which.node,]
+    
+    temp.df <- data.frame(cbind(temp.mtx, c(1:t.max), rev((1:t.max)/(10000*t.max))))
+    colnames(temp.df) <- c("x","y","label", "size")
+    
+    dat.circle <- circleFun(c(0,0), 2, npoints = 100)
+    
+    p.scatter <- ggplot(dat.circle, aes(x,y)) + geom_path() + coord_fixed(ratio=1) +
+       geom_point(data=temp.df,aes(x, y)) # + geom_text(data=temp.df,aes(label=label, size=size))
+    
+    p.index <- ggplot(temp.df, aes(x,y,label=label)) + geom_text(aes(label=label, size=size)) + theme(legend.position="none") + xlim(-1,1) + ylim(-1,1) + coord_fixed(ratio=1)
+    
+    p.traj <- ggplot(temp.df) +
+      geom_line(aes(x=1:t.max, y=x), linetype="dashed") + geom_point(aes(x=1:t.max, y=x), shape=16) +
+      geom_line(aes(x=1:t.max, y=y), linetype="dotted") + geom_point(aes(x=1:t.max, y=y), shape=17) + xlab("time") + ylab("x and y values") + coord_fixed(ratio=t.max/4)
+    
+```
+
+```{r}
+
+# Optional plot of theta_1 dynamics
+#   p.scatter + p.index + p.traj
+
+```
+
+
+
+## Estimates via OLS, e.g., see Luetkepohl (2005)
+```{r}
+
+    Y.mtx <- t(temp.mtx)[,2:t.max]
+    
+    Z.mtx <- rbind(rep(1,(t.max-1)),
+                   t(temp.mtx)[,1:(t.max-1)])
+    
+    # naive OLS estimate              
+    Bhat.mtx <- Y.mtx %*% t(Z.mtx) %*% solve(Z.mtx %*% t(Z.mtx))
+    
+    # orthog projection estimate
+    temp.decomp <- svd(Bhat.mtx[,2:3])
+    temp.orthog <- temp.decomp$u %*% t(temp.decomp$v)
+    
+    # performance comparison
+    target.orthog <- rot_mtx(hyper.thetas[[which.node]])
+    
+    mtx_print(Bhat.mtx[,1,drop=FALSE]) # OLS mu_Hat
+    mtx_print(Bhat.mtx[,-1]) # OLS R_Hat
+    mtx_print(target.orthog) # true R
+    mtx_print(temp.orthog) # ORTH R_Hat
+
+    norm(Bhat.mtx[,-1] - target.orthog, "F")/norm(target.orthog, "F")
+    norm(temp.orthog - target.orthog, "F")/norm(target.orthog, "F")
+```
+
+
+# Re-run estimates under VAR(2)
+```{r}
+  
+  Y.mtx <- t(temp.mtx)[,3:t.max]
+  
+  Z.mtx <- rbind(rep(1,(t.max-2)),
+                 t(temp.mtx)[,2:(t.max-1)],
+                 t(temp.mtx)[,1:(t.max-2)])
+                 
+  Bhat.mtx <- Y.mtx %*% t(Z.mtx) %*% solve(Z.mtx %*% t(Z.mtx))
+  
+  temp.decomp <- svd(Bhat.mtx[,2:3])
+  temp.orthog <- temp.decomp$u %*% t(temp.decomp$v)
+  
+  target.orthog <- rot_mtx(hyper.thetas[[which.node]])
+  
+    mtx_print(Bhat.mtx[,1,drop=FALSE])
+    #mtx_print(Bhat.mtx[,2:3])
+    mtx_print(temp.orthog)
+    #mtx_print(target.orthog)
+    
+  #norm(Bhat.mtx[,2:3] - target.orthog, "F")/norm(target.orthog, "F")
+  norm(temp.orthog - target.orthog, "F")/norm(target.orthog, "F")
+  
+```
+
+```{r}
+  
+  temp.decomp <- svd(Bhat.mtx[,4:5])
+  temp.orthog <- temp.decomp$u %*% t(temp.decomp$v)
+  
+  target.orthog <- rot_mtx(hyper.thetas[[which.node]]);
+  
+    #mtx_print(Bhat.mtx[,1,drop=FALSE])
+    #mtx_print(Bhat.mtx[,4:5])
+    mtx_print(temp.orthog)
+    #mtx_print(target.orthog %*% target.orthog)
+    
+  #norm(Bhat.mtx[,4:5] - target.orthog %*% target.orthog, "F")/norm(target.orthog, "F")
+  norm(temp.orthog - target.orthog %*% target.orthog, "F")/norm(target.orthog, "F")
+
+```
+
+
+## Example: all non-seed nodes evolve according to individual dynamics   
+```{r}
+  
+  t.max <- 400
+  dynamic.node.num <- lp.num-lp.dim
+  
+  # specify rotation matrices via hyperparameter thetas
+  hyper.thetas <- as.list(c(rep(0,lp.dim),
+                              (2*pi)*(1/dynamic.node.num)*seq(1,dynamic.node.num)))
+  
+  trans1 <- lapply(hyper.thetas, rot_mtx)
+  
+  lpvec.list <- list()
+      lpvec.list[[1]] <- lpvs
+  
+  for(t in 2:t.max){
+    lpvec.list[[t]] <- matrix(0, nrow=lp.num, ncol=lp.dim)
+    for(lp in 1:lp.dim)
+      lpvec.list[[t]][lp,] <- lpvec.list[[t-1]][lp,]
+    for(lp in (lp.dim+1):(lp.dim + dynamic.node.num))
+    {
+      lpvec.list[[t]][lp,] <- lpvec.list[[1]][lp,] %*% matrix.power(t(trans1[[lp]]), t-1)
+      }
+  }
+  
+  
+  adj.list <- list()
+  raw.scaled.list <- list()
+  svsd.orthog.list <- list()
+  
+  Xhat.list <- list()
+      Xhat.list[[1]] <- my.scaled %*% t(my.supervised.orthog)
+  
+  
+  for(t in 1:t.max){
+    
+    A <- matrix(runif(lp.num*lp.num) <= abs(lpvec.list[[t]] %*% t(lpvec.list[[t]])), nrow=lp.num)
+    adj.list[[t]] <- sym(A) * sign(lpvec.list[[t]] %*% t(lpvec.list[[t]]))
+  
+    my.eigen <- partial_eigen(adj.list[[t]], lp.dim, symmetric=TRUE)
+    raw.scaled.list[[t]] <- my.eigen$vectors %*% abs(diag(my.eigen$values))^(1/2)
+  
+    my.candidate.svd <- svd(raw.scaled.list[[t]][1:lp.dim,])
+    my.candidate.orthog <- my.candidate.svd$u %*% t(my.candidate.svd$v)
+    svsd.orthog.list[[t]] <- my.candidate.orthog
+  
+    Xhat.list[[t]] <- raw.scaled.list[[t]] %*% t(svsd.orthog.list[[t]])
+    
+  }
+```
+
+
+### Collect simulation data (trajectories) across all nodes
+```{r}
+
+  trajs <- dynamic.node.num
+
+  comp.types <- 4
+  # number of different computations populating the data matrix
+
+  data.table <- matrix(0, nrow=trajs, ncol=comp.types)
+      
+      for(i in 1:trajs){
+      
+        temp.mtx <- matrix(0, nrow=t.max, ncol=lp.dim)
+        
+        which.node <- i + lp.dim
+        
+        for(t in 1:t.max){
+          temp.mtx[t,] <- Xhat.list[[t]][which.node,]
+        }
+      
+###########################
+      
+          Y.mtx <- t(temp.mtx)[,2:t.max]
+        
+          Z.mtx <- rbind(rep(1,(t.max-1)),
+                       t(temp.mtx)[,1:(t.max-1)])
+                       
+          Bhat.mtx <- Y.mtx %*% t(Z.mtx) %*% solve(Z.mtx %*% t(Z.mtx)); Bhat.mtx
+        
+          temp.decomp <- svd(Bhat.mtx[,2:3])
+          temp.orthog <- temp.decomp$u %*% t(temp.decomp$v); temp.orthog
+        
+          target.orthog <- rot_mtx(hyper.thetas[[which.node]]); target.orthog
+        
+          data.table[i, 1] <- norm(Bhat.mtx[,2:3] - target.orthog, "F")/norm(target.orthog, "F")
+          data.table[i, 2] <- norm(temp.orthog - target.orthog, "F")/norm(target.orthog, "F")
+          data.table[i, 3] <- round(hyper.thetas[[which.node]], digits = 3)
+          data.table[i, 4] <- round(norm(lpvec.list[[1]][which.node,],"2"), digits = 2)
+        
+      }
+      data.table <- data.table[c(-dynamic.node.num,-dynamic.node.num/2),]
+      # technicality: remove points for which we do not have at least two data points
+      
+      data.table <- as.data.frame(data.table)
+      colnames(data.table) <- c("OLS_relFrob","OLS_ORTH_relFrob","hyp_Theta","lp_norm")
+      
+```
+
+## Plot: rel. Frob. err. (points)
+```{r}
+
+  plot_rF_pts <- 
+    ggplot(data.table, aes(x=OLS_relFrob, y=OLS_ORTH_relFrob)) +
+            xlab("\nOLS rel. Frob. err.") + ylab("OLS ORTH rel. Frob. err.\n") +
+            theme(legend.position="none", text = element_text(size=20)) +
+            geom_point(inherit.aes = TRUE, size=1.5) 
+
+
+  plot_rF_pts
+
+```
+
+
+## Plot: rel. Frob. err. (lp norm vals)
+```{r}
+
+    plot_rF_nums <-
+          ggplot(data.table, aes(x=OLS_relFrob, y=OLS_ORTH_relFrob)) +
+            xlab("\nOLS rel. Frob. err.") + ylab("OLS ORTH rel. Frob. err.\n") +
+            theme(legend.position="none", text = element_text(size=20)) +
+            geom_text(aes(label=lp_norm), check_overlap = TRUE, size=3.8)
+
+    plot_rF_nums
+
+```
+
+# End of File
+
