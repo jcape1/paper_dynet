@@ -1,0 +1,243 @@
+---
+title: "DyNet paper code: Non-linear dynamics"
+author:
+    name: Joshua Cape
+    affiliation: University of Pittsburgh
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    df_print: paged
+---
+
+## Preliminaries
+```{r message=FALSE}
+
+    rm(list = ls())
+
+    knitr::opts_chunk$set(comment = NA)
+
+    source("code_dynet_preamble.R")
+
+```
+
+## Generate initial (null) latent vectors
+```{r}
+
+  set.seed(12345)
+  lp.dim <- 2;
+  lp.num <- 1000;
+    
+
+    lpvs0 <- diag(lp.dim)
+    
+    lpvs <- rbind(lpvs0,
+                  t(apply(matrix(rnorm((lp.num - dim(lpvs0)[1]) * lp.dim, mean=0, sd=1),
+                                 nrow=(lp.num - dim(lpvs0)[1]), ncol=lp.dim),
+                             1,
+                             function(x) (x/norm(x, "2"))*runif(1, min=0, max=1)^(1/lp.dim))))
+
+    XXT <- lpvs %*% t(lpvs)
+    Prob <- abs(XXT)
+    A <- matrix(runif(lp.num*lp.num) <= Prob, nrow=lp.num)
+
+    matrix.A <- sym(A) * sign(XXT)
+    
+    my.eigen <- partial_eigen(matrix.A, lp.dim, symmetric=TRUE)
+    my.scaled <- my.eigen$vectors %*% abs(diag(my.eigen$values))^(1/2)
+
+    my.candidate.svd <- svd(my.scaled[1:lp.dim,])
+    my.candidate.orthog <- my.candidate.svd$u %*% t(my.candidate.svd$v)
+    my.supervised.orthog <- my.candidate.orthog
+   
+    theory.svd <- svd(t(lpvs) %*% my.scaled)
+    theory.orthog <- theory.svd$u %*% t(theory.svd$v)
+    
+    
+# Prescribe non-linear (radial) dynamics
+
+    
+t.max <- 100
+    
+dynamic.r.vals <- c(0.50, 0.75, 1.00,
+                    1.25, 1.50, 1.75, 2.00,
+                    2.25, 2.50, 2.75, 3.00,
+                    3.25, 3.50, 3.60, 3.70, 3.80, 3.90, 3.925, 3.95, 3.975, 3.99)
+dynamnic.node.num <- length(dynamic.r.vals)
+    
+    
+    lpvec.list <- list(); lpvec.list[[1]] <- lpvs
+    
+    Xhat.list <- list(); Xhat.list[[1]] <- my.scaled %*% t(my.supervised.orthog)
+    
+    
+    for(t in 2:t.max){
+      lpvec.list[[t]] <- matrix(0, nrow=lp.num, ncol=lp.dim)
+      for(lp in 1:lp.dim)
+        lpvec.list[[t]][lp,] <- lpvec.list[[t-1]][lp,]
+      for(lp in (lp.dim+1):(lp.dim + dynamnic.node.num))
+      {
+        lpvec.list[[t]][lp,] <- (lpvec.list[[t-1]][lp,]/norm(lpvec.list[[t-1]][lp,], "2")) * dynamic.r.vals[lp - lp.dim] * norm(lpvec.list[[t-1]][lp,], "2") * (1-norm(lpvec.list[[t-1]][lp,], "2"))
+        }
+      lpvec.list[[t]][(lp.dim + dynamnic.node.num + 1):lp.num,] <- t(apply(
+        matrix(rnorm((lp.num-lp.dim-dynamnic.node.num)*lp.dim, mean=0, sd=1),
+               nrow=(lp.num-lp.dim-dynamnic.node.num),
+               ncol=lp.dim),
+        1,
+        function(x) (x/norm(x, "2"))*runif(1, min=0, max=1)^(1/lp.dim)))
+    }
+    
+    
+    adj.list <- list(); raw.scaled.list <- list(); svsd.orthog.list <- list()
+    
+    
+    for(t in 1:t.max){
+      
+      A <- matrix(runif(lp.num*lp.num) <= abs(lpvec.list[[t]] %*% t(lpvec.list[[t]])), nrow=lp.num)
+      adj.list[[t]] <- sym(A) * sign(lpvec.list[[t]] %*% t(lpvec.list[[t]]))
+    
+      my.eigen <- partial_eigen(adj.list[[t]], lp.dim, symmetric=TRUE)
+      raw.scaled.list[[t]] <- my.eigen$vectors %*% abs(diag(my.eigen$values))^(1/2)
+    
+      my.candidate.svd <- svd(raw.scaled.list[[t]][1:lp.dim,])
+      my.candidate.orthog <- my.candidate.svd$u %*% t(my.candidate.svd$v)
+      svsd.orthog.list[[t]] <- my.candidate.orthog
+    
+      Xhat.list[[t]] <- raw.scaled.list[[t]] %*% t(svsd.orthog.list[[t]])
+      
+    }
+
+```
+
+
+
+## Example:  mu = 2.25 (oscillation around a single value)
+```{r}
+
+which.node <- 10  # dynamic.r.vals[which.node-lp.dim]
+    
+    temp.mtx <- matrix(0, nrow=t.max, ncol=lp.dim)
+    for(t in 1:t.max) temp.mtx[t,] <- Xhat.list[[t]][which.node,]
+    
+    temp.df <- data.frame(cbind(temp.mtx, c(1:t.max), rev((1:t.max)/(10000*t.max))))
+    colnames(temp.df) <- c("x","y","label", "size")
+    
+    temp.truelps <- matrix(0, nrow=t.max, ncol=lp.dim)
+    for(t in 1:t.max) temp.truelps[t,] <- lpvec.list[[t]][which.node,]
+    
+    dat.circle <- circleFun(c(0,0), 2, npoints = 100)
+    
+    p.scatter <- ggplot(dat.circle, aes(x,y)) + geom_path() + coord_fixed() +
+       geom_point(data=temp.df,aes(x, y), size=1.5) + theme(legend.position="none", text = element_text(size=20))
+    
+    p.index <- ggplot(temp.df, aes(x,y,label=label)) + geom_text(aes(label=label, size=size)) + theme(legend.position="none") + theme(legend.position="none", text = element_text(size=20))
+    
+    p.traj <- ggplot(temp.df) + xlab("time") + ylab("x and y values") +
+      geom_line(aes(x=1:t.max, y=x), linetype="dashed") + geom_point(aes(x=1:t.max, y=x), shape=16) +
+      geom_line(aes(x=1:t.max, y=y), linetype="dotted") + geom_point(aes(x=1:t.max, y=y), shape=17)
+
+    p.scatter
+    
+    p.index
+
+```
+
+```{r}
+
+  mod2 <- Mclust(temp.mtx, verbose=FALSE)
+
+  plot(mod2, what = "classification", xlab = "x", ylab="y", cex.lab=2)
+  abline(lm(y ~ x, temp.df), lty=2)
+  abline(a=0, b=func_slope(lpvec.list[[1]][which.node,]))
+  points(mod2$parameters$mean[1,], mod2$parameters$mean[2,], pch=10)
+  points(temp.truelps[t.max,1], temp.truelps[t.max,2], pch=15)
+  
+```
+
+
+## Example: mu = 3.25 (eventual oscillations between two values)
+```{r}
+
+which.node <- 14 # dynamic.r.vals[which.node-lp.dim]
+    
+    temp.mtx <- matrix(0, nrow=t.max, ncol=lp.dim)
+    for(t in 1:t.max) temp.mtx[t,] <- Xhat.list[[t]][which.node,]
+    
+    temp.df <- data.frame(cbind(temp.mtx, c(1:t.max), rev((1:t.max)/(10000*t.max))))
+    colnames(temp.df) <- c("x","y","label", "size")
+    
+    temp.truelps <- matrix(0, nrow=t.max, ncol=lp.dim)
+    for(t in 1:t.max) temp.truelps[t,] <- lpvec.list[[t]][which.node,]
+    
+    dat.circle <- circleFun(c(0,0), 2, npoints = 100)
+    
+    p.scatter <- ggplot(dat.circle, aes(x,y)) + geom_path() + coord_fixed() +
+       geom_point(data=temp.df,aes(x, y), size=1.5) + theme(legend.position="none", text = element_text(size=20))
+    
+    p.index <- ggplot(temp.df, aes(x,y,label=label)) + geom_text(aes(label=label, size=size)) + theme(legend.position="none") + theme(legend.position="none", text = element_text(size=20))
+    
+    p.traj <- ggplot(temp.df) + xlab("time") + ylab("x and y values") +
+      geom_line(aes(x=1:t.max, y=x), linetype="dashed") + geom_point(aes(x=1:t.max, y=x), shape=16) +
+      geom_line(aes(x=1:t.max, y=y), linetype="dotted") + geom_point(aes(x=1:t.max, y=y), shape=17)
+
+    p.scatter
+    
+    p.index
+    
+```
+
+```{r}
+
+  mod2 <- Mclust(temp.mtx, verbose=FALSE)
+
+  plot(mod2, what = "classification", xlab = "x", ylab="y", cex.lab=2)
+  abline(lm(y ~ x, temp.df), lty=2)
+  abline(a=0, b=func_slope(lpvec.list[[1]][which.node,]))
+  points(mod2$parameters$mean[1,], mod2$parameters$mean[2,], pch=10)
+  points(temp.truelps[(t.max-1):t.max,1], temp.truelps[(t.max-1):t.max,2], pch=15)
+
+```
+
+## Example: mu = 3.5 (eventual oscillations around four values)
+```{r}
+
+which.node <- 15 # dynamic.r.vals[which.node-lp.dim]
+    
+    temp.mtx <- matrix(0, nrow=t.max, ncol=lp.dim)
+    for(t in 1:t.max) temp.mtx[t,] <- Xhat.list[[t]][which.node,]
+    
+    temp.df <- data.frame(cbind(temp.mtx, c(1:t.max), rev((1:t.max)/(10000*t.max))))
+    colnames(temp.df) <- c("x","y","label", "size")
+    
+    temp.truelps <- matrix(0, nrow=t.max, ncol=lp.dim)
+    for(t in 1:t.max) temp.truelps[t,] <- lpvec.list[[t]][which.node,]
+    
+    dat.circle <- circleFun(c(0,0), 2, npoints = 100)
+    
+    p.scatter <- ggplot(dat.circle, aes(x,y)) + geom_path() + coord_fixed() +
+       geom_point(data=temp.df,aes(x, y), size=1.5) + theme(legend.position="none", text = element_text(size=20))
+    
+    p.index <- ggplot(temp.df, aes(x,y,label=label)) + geom_text(aes(label=label, size=size)) + theme(legend.position="none") + theme(legend.position="none", text = element_text(size=20))
+    
+    p.traj <- ggplot(temp.df) + xlab("time") + ylab("x and y values") +
+      geom_line(aes(x=1:t.max, y=x), linetype="dashed") + geom_point(aes(x=1:t.max, y=x), shape=16) +
+      geom_line(aes(x=1:t.max, y=y), linetype="dotted") + geom_point(aes(x=1:t.max, y=y), shape=17)
+
+    p.scatter
+    
+    p.index
+
+```
+
+```{r}
+
+  mod2 <- Mclust(temp.mtx, verbose=FALSE)
+
+  plot(mod2, what = "classification", xlab = "x", ylab="y", cex.lab=2)
+  abline(lm(y ~ x, temp.df), lty=2)
+  abline(a=0, b=func_slope(lpvec.list[[1]][which.node,]))
+  points(mod2$parameters$mean[1,], mod2$parameters$mean[2,], pch=10)
+  points(temp.truelps[(t.max-4):t.max,1], temp.truelps[(t.max-4):t.max,2], pch=15)
+
+```
+
+## End of File
